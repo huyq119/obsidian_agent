@@ -42,9 +42,16 @@ def scan_vault_files(
             warnings.append(f"Could not decode {relative_path.as_posix()}: {exc}")
             continue
 
-        note = parse_markdown_note(relative_path, text, modified_at=stat.st_mtime)
+        try:
+            note = parse_markdown_note(relative_path, text, modified_at=stat.st_mtime)
+            note_chunks = chunk_note(note, target_tokens=target_tokens, max_tokens=max_tokens)
+        except Exception as exc:
+            skipped_files += 1
+            warnings.append(f"Could not parse {relative_path.as_posix()}: {exc}")
+            continue
+
         notes.append(note)
-        chunks.extend(chunk_note(note, target_tokens=target_tokens, max_tokens=max_tokens))
+        chunks.extend(note_chunks)
         scanned_files += 1
 
     return ScanResult(
