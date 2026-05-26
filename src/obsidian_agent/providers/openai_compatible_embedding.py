@@ -18,7 +18,7 @@ class OpenAICompatibleEmbeddingProvider:
         self.dimensions = dimensions
         self.client = OpenAI(
             api_key=_require_api_key(api_key_env),
-            base_url=base_url,
+            base_url=_normalize_base_url(base_url),
         )
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -39,3 +39,10 @@ def _require_api_key(env_name: str) -> str:
     if not api_key:
         raise RuntimeError(f"Missing API key environment variable: {env_name}")
     return api_key
+
+
+def _normalize_base_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/embeddings"):
+        return normalized[: -len("/embeddings")]
+    return normalized
