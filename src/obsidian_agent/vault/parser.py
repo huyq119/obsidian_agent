@@ -36,20 +36,21 @@ def parse_markdown_note(path: Path, text: str, modified_at: float | None = None)
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    if not text.startswith("---\n"):
+    start_match = re.match(r"^\ufeff?---\r?\n", text)
+    if start_match is None:
         return {}, text
 
-    closing = re.search(r"^---\s*$", text[4:], re.MULTILINE)
+    closing = re.search(r"^---[ \t]*(?:\r?\n|$)", text[start_match.end() :], re.MULTILINE)
     if closing is None:
         return {}, text
 
-    end = 4 + closing.start()
-    content_start = 4 + closing.end()
-    raw_frontmatter = text[4:end]
+    end = start_match.end() + closing.start()
+    content_start = start_match.end() + closing.end()
+    raw_frontmatter = text[start_match.end() : end]
     parsed = yaml.safe_load(raw_frontmatter) or {}
     if not isinstance(parsed, dict):
         parsed = {}
-    return parsed, text[content_start:].lstrip("\n")
+    return parsed, text[content_start:].lstrip("\r\n")
 
 
 def _frontmatter_tags(frontmatter: dict[str, Any]) -> list[str]:
