@@ -47,7 +47,7 @@ def status(data_dir: Path | None = typer.Option(None, "--data-dir", help="Agent 
         console.print(str(exc))
         raise typer.Exit(1) from exc
 
-    console.print(f"Vault: {config.vault_path}")
+    console.print(f"Vault: {config.vault_path}", soft_wrap=True)
     console.print("Notes: 0")
     console.print("Chunks: 0")
     console.print("Last scan: never")

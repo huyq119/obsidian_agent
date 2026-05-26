@@ -20,6 +20,15 @@ def test_init_creates_config_and_data_dirs(tmp_path):
     assert "Initialized" in result.stdout
 
 
+def test_init_without_vault_is_clear(tmp_path):
+    data_dir = tmp_path / ".obsidian-agent"
+
+    result = runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 1
+    assert "Missing required option: --vault" in result.stdout
+
+
 def test_status_before_init_is_clear(tmp_path):
     data_dir = tmp_path / ".obsidian-agent"
 
@@ -27,3 +36,22 @@ def test_status_before_init_is_clear(tmp_path):
 
     assert result.exit_code == 1
     assert "Run `obsidian-agent init` first" in result.stdout
+
+
+def test_status_after_init_prints_config_defaults(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    data_dir = tmp_path / ".obsidian-agent"
+
+    init_result = runner.invoke(app, ["init", "--vault", str(vault), "--data-dir", str(data_dir)])
+    result = runner.invoke(app, ["status", "--data-dir", str(data_dir)])
+
+    assert init_result.exit_code == 0
+    assert result.exit_code == 0
+    assert f"Vault: {vault.resolve()}" in result.stdout
+    assert "Notes: 0" in result.stdout
+    assert "Chunks: 0" in result.stdout
+    assert "Last scan: never" in result.stdout
+    assert "LLM: deepseek/deepseek-v4-pro" in result.stdout
+    assert "Embedding: openai/text-embedding-3-small" in result.stdout
+    assert "Readonly: true" in result.stdout
