@@ -31,7 +31,11 @@ def init(
         console.print("Missing required option: --vault")
         raise typer.Exit(1)
     target = _data_dir(data_dir)
-    config = create_default_config(vault)
+    try:
+        config = create_default_config(vault)
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(1) from exc
     save_config(config, config_path_for(target))
     (target / "vectors").mkdir(parents=True, exist_ok=True)
     (target / "reports").mkdir(parents=True, exist_ok=True)
@@ -43,7 +47,7 @@ def status(data_dir: Path | None = typer.Option(None, "--data-dir", help="Agent 
     target = _data_dir(data_dir)
     try:
         config = load_config(config_path_for(target))
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         console.print(str(exc))
         raise typer.Exit(1) from exc
 

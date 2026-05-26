@@ -64,10 +64,15 @@ def config_path_for(data_dir: Path) -> Path:
     return data_dir / "config.toml"
 
 
-def create_default_config(vault_path: Path) -> AgentConfig:
+def _validate_vault_path(vault_path: Path) -> Path:
     resolved = vault_path.expanduser().resolve()
     if not resolved.exists() or not resolved.is_dir():
         raise ValueError(f"Vault path does not exist or is not a directory: {resolved}")
+    return resolved
+
+
+def create_default_config(vault_path: Path) -> AgentConfig:
+    resolved = _validate_vault_path(vault_path)
     return AgentConfig(vault_path=resolved)
 
 
@@ -92,8 +97,9 @@ def load_config(path: Path) -> AgentConfig:
     if not path.exists():
         raise FileNotFoundError(f"Run `obsidian-agent init` first. Missing config: {path}")
     data = tomllib.loads(path.read_text(encoding="utf-8"))
+    vault_path = _validate_vault_path(Path(data["vault_path"]))
     return AgentConfig(
-        vault_path=Path(data["vault_path"]).expanduser().resolve(),
+        vault_path=vault_path,
         readonly=bool(data.get("readonly", True)),
         scan=ScanConfig(**data.get("scan", {})),
         chunking=ChunkingConfig(**data.get("chunking", {})),
