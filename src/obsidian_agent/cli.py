@@ -1,17 +1,31 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from obsidian_agent.config import (
+    AgentConfig,
     config_path_for,
     create_default_config,
     default_data_dir,
     load_config,
     save_config,
 )
+from obsidian_agent.providers.deepseek_llm import DeepSeekLLMProvider
+from obsidian_agent.providers.fake import FakeEmbeddingProvider, FakeLLMProvider
+from obsidian_agent.providers.openai_compatible_embedding import OpenAICompatibleEmbeddingProvider
+from obsidian_agent.providers.openai_embedding import OpenAIEmbeddingProvider
+from obsidian_agent.retrieval.qa import answer_question
+from obsidian_agent.retrieval.retriever import Retriever
+from obsidian_agent.storage.sqlite_store import SQLiteStore
+from obsidian_agent.storage.vector_store import ChromaVectorStore, InMemoryVectorStore
+from obsidian_agent.suggestions.reporter import render_json_report, render_markdown_report
+from obsidian_agent.suggestions.rules import build_suggestions
+from obsidian_agent.vault.models import NoteChunk
+from obsidian_agent.vault.scanner import scan_vault_files
 
 
 app = typer.Typer(help="Read-only CLI agent for Obsidian knowledge bases.")
@@ -20,6 +34,93 @@ console = Console()
 
 def _data_dir(value: Path | None) -> Path:
     return (value or default_data_dir()).expanduser().resolve()
+
+
+def _load_agent_config(target: Path) -> AgentConfig:
+    try:
+        return load_config(config_path_for(target))
+    except FileNotFoundError as exc:
+        console.print(str(exc))
+        raise typer.Exit(1) from exc
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(1) from exc
+
+
+def _db_path(target: Path) -> Path:
+    return target / "agent.db"
+
+
+def _build_embedding_provider(config: AgentConfig, override: str | None):
+    provider_name = (override or config.embedding.provider).lower()
+    if provider_name == "fake":
+        return FakeEmbeddingProvider(dimensions=8)
+    if provider_name == "openai":
+        return OpenAIEmbeddingProvider(config.embedding)
+    if provider_name == "openai_compatible":
+        return OpenAICompatibleEmbeddingProvider(
+            base_url=config.embedding.base_url,
+            api_key_env=config.embedding.api_key_env,
+            embedding_model=config.embedding.embedding_model,
+            dimensions=config.embedding.dimensions,
+        )
+    console.print(f"Unknown embedding provider: {provider_name}")
+    raise typer.Exit(1)
+
+
+def _build_llm_provider(config: AgentConfig, override: str | None):
+    provider_name = (override or config.llm.provider).lower()
+    if provider_name == "fake":
+        return FakeLLMProvider()
+    if provider_name == "deepseek":
+        return DeepSeekLLMProvider(config.llm)
+    console.print(f"Unknown LLM provider: {provider_name}")
+    raise typer.Exit(1)
+
+
+def _chunk_payload(chunk: dict, note: dict | None = None) -> dict:
+    title = str(note["title"]) if note else str(chunk.get("title", ""))
+    return {
+        "id": str(chunk["id"]),
+        "text": str(chunk["text"]),
+        "metadata": {
+            "path": str(chunk["note_path"]),
+            "title": title,
+            "heading": str(chunk["heading"]),
+            "chunk_index": int(chunk["chunk_index"]),
+        },
+    }
+
+
+def _build_vector_store_from_sqlite(
+    store: SQLiteStore,
+    embedding_provider,
+    *,
+    use_chroma: bool,
+    data_dir: Path,
+):
+    if use_chroma:
+        vector_store = ChromaVectorStore(data_dir / "vectors")
+    else:
+        vector_store = InMemoryVectorStore()
+
+    chunks = store.list_all_chunks()
+    if not chunks:
+        return vector_store
+
+    note_cache: dict[str, dict] = {}
+    payloads = []
+    texts = []
+    for chunk in chunks:
+        note_path = str(chunk["note_path"])
+        if note_path not in note_cache:
+            note_cache[note_path] = store.get_note(note_path)
+        payloads.append(_chunk_payload(chunk, note_cache[note_path]))
+        texts.append(str(chunk["text"]))
+
+    embeddings = embedding_provider.embed_texts(texts)
+    vector_store.upsert_chunks(payloads, embeddings)
+    return vector_store
 
 
 @app.command()
@@ -43,18 +144,230 @@ def init(
 
 
 @app.command()
+def scan(
+    data_dir: Path | None = typer.Option(None, "--data-dir"),
+    rebuild: bool = typer.Option(False, "--rebuild"),
+    embedding_provider: str | None = typer.Option(None, "--embedding-provider"),
+) -> None:
+    target = _data_dir(data_dir)
+    config = _load_agent_config(target)
+    db_path = _db_path(target)
+
+    if rebuild:
+        if db_path.exists():
+            db_path.unlink()
+        vectors_dir = target / "vectors"
+        if vectors_dir.exists():
+            shutil.rmtree(vectors_dir, ignore_errors=True)
+        vectors_dir.mkdir(parents=True, exist_ok=True)
+
+    store = SQLiteStore(db_path)
+    store.initialize()
+
+    use_fake = (embedding_provider or config.embedding.provider).lower() == "fake"
+    embedder = _build_embedding_provider(config, embedding_provider)
+    vector_store = None if use_fake else ChromaVectorStore(target / "vectors")
+    if rebuild and vector_store is not None:
+        vector_store.reset()
+
+    scan_result = scan_vault_files(
+        config.vault_path,
+        config.scan,
+        target_tokens=config.chunking.target_tokens,
+        max_tokens=config.chunking.max_tokens,
+    )
+
+    current_paths = {note.path for note in scan_result.notes}
+    updated_paths: list[str] = []
+    skipped_count = 0
+
+    for note in scan_result.notes:
+        existing_hash = store.get_note_hash(note.path)
+        if not rebuild and existing_hash == note.content_hash:
+            skipped_count += 1
+            continue
+
+        note_chunks = [chunk for chunk in scan_result.chunks if chunk.note_path == note.path]
+        old_chunk_ids = store.get_chunk_ids_for_paths([note.path])
+        store.upsert_note_with_chunks(note, note_chunks)
+        updated_paths.append(note.path)
+
+        if vector_store is not None and note_chunks:
+            if old_chunk_ids:
+                vector_store.delete_chunk_ids(old_chunk_ids)
+            payloads = [_chunk_payload_from_model(chunk, note) for chunk in note_chunks]
+            embeddings = embedder.embed_texts([chunk.text for chunk in note_chunks])
+            vector_store.upsert_chunks(payloads, embeddings)
+
+    deleted_paths = sorted(
+        {note["path"] for note in store.list_notes()} - current_paths,
+    )
+    deleted_chunk_ids: list[str] = []
+    if deleted_paths:
+        deleted_chunk_ids = store.get_chunk_ids_for_paths(deleted_paths)
+        store.delete_notes_not_in(current_paths)
+        if vector_store is not None and deleted_chunk_ids:
+            vector_store.delete_chunk_ids(deleted_chunk_ids)
+    else:
+        store.delete_notes_not_in(current_paths)
+
+    store.recompute_backlinks()
+
+    summary = {
+        "scanned": scan_result.scanned_files,
+        "skipped": skipped_count,
+        "updated": len(updated_paths),
+        "deleted": len(deleted_paths),
+        "warnings": len(scan_result.warnings),
+        "notes": store.count_notes(),
+        "chunks": store.count_chunks(),
+    }
+    store.set_last_scan_summary(summary)
+
+    for warning in scan_result.warnings:
+        console.print(f"Warning: {warning}")
+
+    console.print(f"Scanned: {scan_result.scanned_files}")
+    console.print(f"Updated: {len(updated_paths)}")
+    console.print(f"Deleted: {len(deleted_paths)}")
+    console.print(f"Warnings: {len(scan_result.warnings)}")
+    console.print(f"Notes: {store.count_notes()}")
+    console.print(f"Chunks: {store.count_chunks()}")
+
+
+@app.command()
+def ask(
+    question: str,
+    data_dir: Path | None = typer.Option(None, "--data-dir"),
+    embedding_provider: str | None = typer.Option(None, "--embedding-provider"),
+    llm_provider: str | None = typer.Option(None, "--llm-provider"),
+) -> None:
+    target = _data_dir(data_dir)
+    config = _load_agent_config(target)
+    db_path = _db_path(target)
+    if not db_path.exists():
+        console.print("Run scan first")
+        raise typer.Exit(1)
+
+    store = SQLiteStore(db_path)
+    store.initialize()
+    if store.count_chunks() == 0:
+        console.print("Run scan first")
+        raise typer.Exit(1)
+
+    embedder = _build_embedding_provider(config, embedding_provider)
+    llm = _build_llm_provider(config, llm_provider)
+    use_fake = (embedding_provider or config.embedding.provider).lower() == "fake"
+    if use_fake:
+        vector_store = _build_vector_store_from_sqlite(
+            store,
+            embedder,
+            use_chroma=False,
+            data_dir=target,
+        )
+    else:
+        vector_store = ChromaVectorStore(target / "vectors")
+        if vector_store.count() == 0:
+            console.print("Run scan first")
+            raise typer.Exit(1)
+
+    retriever = Retriever(vector_store, embedder, top_k=config.retrieval.top_k)
+    contexts = retriever.retrieve(question)
+    answer, sources = answer_question(question, contexts, llm)
+
+    console.print(answer)
+    console.print("Sources:")
+    for source in sources:
+        console.print(source)
+
+
+@app.command()
+def suggest(
+    data_dir: Path | None = typer.Option(None, "--data-dir"),
+    output: Path | None = typer.Option(None, "--output"),
+    format: str = typer.Option("markdown", "--format"),
+) -> None:
+    target = _data_dir(data_dir)
+    config = _load_agent_config(target)
+    db_path = _db_path(target)
+    if not db_path.exists():
+        console.print("Run scan first")
+        raise typer.Exit(1)
+
+    store = SQLiteStore(db_path)
+    store.initialize()
+    notes = store.list_notes()
+    suggestions = build_suggestions(notes)
+
+    if format.lower() == "json":
+        report = render_json_report(suggestions)
+    else:
+        report = render_markdown_report(suggestions)
+
+    if output is None:
+        console.print(report.rstrip())
+        return
+
+    resolved_output = output.expanduser().resolve()
+    vault_root = config.vault_path.resolve()
+    try:
+        resolved_output.relative_to(vault_root)
+        inside_vault = True
+    except ValueError:
+        inside_vault = False
+
+    if inside_vault:
+        console.print("Refusing to write inside the vault")
+        raise typer.Exit(1)
+
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+    resolved_output.write_text(report, encoding="utf-8")
+    console.print(f"Wrote suggestions to {resolved_output}")
+
+
+@app.command()
 def status(data_dir: Path | None = typer.Option(None, "--data-dir", help="Agent data directory.")) -> None:
     target = _data_dir(data_dir)
-    try:
-        config = load_config(config_path_for(target))
-    except (FileNotFoundError, ValueError) as exc:
-        console.print(str(exc))
-        raise typer.Exit(1) from exc
+    config = _load_agent_config(target)
+
+    note_count = 0
+    chunk_count = 0
+    last_scan = "never"
+    db_path = _db_path(target)
+    if db_path.exists():
+        store = SQLiteStore(db_path)
+        store.initialize()
+        note_count = store.count_notes()
+        chunk_count = store.count_chunks()
+        summary = store.get_last_scan_summary()
+        if summary is not None:
+            last_scan = (
+                f"scanned={summary.get('scanned', 0)}, "
+                f"updated={summary.get('updated', 0)}, "
+                f"deleted={summary.get('deleted', 0)}"
+            )
 
     console.print(f"Vault: {config.vault_path}", soft_wrap=True)
-    console.print("Notes: 0")
-    console.print("Chunks: 0")
-    console.print("Last scan: never")
+    console.print(f"Notes: {note_count}")
+    console.print(f"Chunks: {chunk_count}")
+    console.print(f"Last scan: {last_scan}")
     console.print(f"LLM: {config.llm.provider}/{config.llm.chat_model}")
     console.print(f"Embedding: {config.embedding.provider}/{config.embedding.embedding_model}")
     console.print(f"Readonly: {str(config.readonly).lower()}")
+
+
+def _chunk_payload_from_model(chunk: NoteChunk, note) -> dict:
+    return {
+        "id": chunk.id,
+        "text": chunk.text,
+        "metadata": {
+            "path": chunk.note_path,
+            "title": note.title,
+            "heading": chunk.heading,
+            "chunk_index": chunk.chunk_index,
+        },
+    }
+
+
+if __name__ == "__main__":
+    app()
