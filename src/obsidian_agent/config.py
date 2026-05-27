@@ -56,6 +56,9 @@ class AgentConfig:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
 
 
+SUPPORTED_CONFIG_PRESETS = ("default", "deepseek-bigmodel")
+
+
 def default_data_dir() -> Path:
     return Path.cwd() / ".obsidian-agent"
 
@@ -72,8 +75,26 @@ def _validate_vault_path(vault_path: Path) -> Path:
 
 
 def create_default_config(vault_path: Path) -> AgentConfig:
+    return create_config(vault_path=vault_path, preset="default")
+
+
+def create_config(vault_path: Path, *, preset: str = "default") -> AgentConfig:
     resolved = _validate_vault_path(vault_path)
-    return AgentConfig(vault_path=resolved)
+    if preset == "default":
+        return AgentConfig(vault_path=resolved)
+    if preset == "deepseek-bigmodel":
+        return AgentConfig(
+            vault_path=resolved,
+            embedding=EmbeddingConfig(
+                provider="openai_compatible",
+                base_url="https://open.bigmodel.cn/api/paas/v4/embeddings",
+                api_key_env="EMBEDDING_API_KEY",
+                embedding_model="embedding-3",
+                dimensions=1536,
+            ),
+        )
+    supported = ", ".join(SUPPORTED_CONFIG_PRESETS)
+    raise ValueError(f"Unknown config preset: {preset}. Supported presets: {supported}")
 
 
 def _to_dict(config: AgentConfig) -> dict[str, Any]:

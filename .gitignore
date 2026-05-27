@@ -3,4 +3,10 @@ __pycache__/
 .pytest_cache/
 .venv/
 .obsidian-agent/
+.qodo/
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
 uv.lock

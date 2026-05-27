@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import typer
@@ -8,18 +10,21 @@ from rich.console import Console
 
 from obsidian_agent.config import (
     AgentConfig,
+    RetrievalConfig,
     config_path_for,
-    create_default_config,
+    create_config,
     default_data_dir,
     load_config,
     save_config,
 )
 from obsidian_agent.providers.deepseek_llm import DeepSeekLLMProvider
+from obsidian_agent.providers.base import RetrievedChunk
 from obsidian_agent.providers.fake import FakeEmbeddingProvider, FakeLLMProvider
 from obsidian_agent.providers.openai_compatible_embedding import OpenAICompatibleEmbeddingProvider
 from obsidian_agent.providers.openai_embedding import OpenAIEmbeddingProvider
 from obsidian_agent.retrieval.qa import answer_question
 from obsidian_agent.retrieval.retriever import Retriever
+from obsidian_agent.storage.memory_store import MemoryStore
 from obsidian_agent.storage.sqlite_store import SQLiteStore
 from obsidian_agent.storage.vector_store import ChromaVectorStore, InMemoryVectorStore
 from obsidian_agent.suggestions.reporter import render_json_report, render_markdown_report
@@ -29,7 +34,9 @@ from obsidian_agent.vault.scanner import scan_vault_files
 
 
 app = typer.Typer(help="Read-only CLI agent for Obsidian knowledge bases.")
+memory_app = typer.Typer(help="Manage local explicit memories.")
 console = Console()
+app.add_typer(memory_app, name="memory")
 
 
 def _data_dir(value: Path | None) -> Path:
@@ -49,6 +56,16 @@ def _load_agent_config(target: Path) -> AgentConfig:
 
 def _db_path(target: Path) -> Path:
     return target / "agent.db"
+
+
+def _memory_db_path(target: Path) -> Path:
+    return target / "memory.db"
+
+
+def _memory_store(target: Path) -> MemoryStore:
+    store = MemoryStore(_memory_db_path(target))
+    store.initialize()
+    return store
 
 
 def _build_embedding_provider(config: AgentConfig, override: str | None):
@@ -127,13 +144,14 @@ def _build_vector_store_from_sqlite(
 def init(
     vault: Path | None = typer.Option(None, "--vault", help="Path to the Obsidian vault."),
     data_dir: Path | None = typer.Option(None, "--data-dir", help="Agent data directory."),
+    preset: str = typer.Option("default", "--preset", help="Configuration preset: default or deepseek-bigmodel."),
 ) -> None:
     if vault is None:
         console.print("Missing required option: --vault")
         raise typer.Exit(1)
     target = _data_dir(data_dir)
     try:
-        config = create_default_config(vault)
+        config = create_config(vault, preset=preset)
     except ValueError as exc:
         console.print(str(exc))
         raise typer.Exit(1) from exc
@@ -141,6 +159,65 @@ def init(
     (target / "vectors").mkdir(parents=True, exist_ok=True)
     (target / "reports").mkdir(parents=True, exist_ok=True)
     console.print(f"Initialized obsidian-agent at {target}")
+
+
+@memory_app.command("add")
+def memory_add(
+    text: str,
+    data_dir: Path | None = typer.Option(None, "--data-dir"),
+) -> None:
+    target = _data_dir(data_dir)
+    memory_id = _memory_store(target).add_memory(text)
+    console.print(f"Added memory: {memory_id}")
+
+
+@memory_app.command("list")
+def memory_list(
+    data_dir: Path | None = typer.Option(None, "--data-dir"),
+    limit: int = typer.Option(20, "--limit", min=1),
+) -> None:
+    target = _data_dir(data_dir)
+    memories = _memory_store(target).list_memories(limit=limit)
+    if not memories:
+        console.print("No memories")
+        return
+    for memory in memories:
+        console.print(f"{memory['id']}. {memory['text']}", soft_wrap=True)
+
+
+@memory_app.command("search")
+def memory_search(
+    query: str,
+    data_dir: Path | None = typer.Option(None, "--data-dir"),
+    limit: int = typer.Option(5, "--limit", min=1),
+) -> None:
+    target = _data_dir(data_dir)
+    memories = _memory_store(target).search_memories(query, limit=limit)
+    if not memories:
+        console.print("No matching memories")
+        return
+    for memory in memories:
+        score = int(memory.get("score", 0))
+        console.print(f"{memory['id']}. score={score} {memory['text']}", soft_wrap=True)
+
+
+@app.command()
+def configure(
+    data_dir: Path | None = typer.Option(None, "--data-dir"),
+    top_k: int | None = typer.Option(None, "--top-k", min=1, help="Persist the default retrieval result count."),
+) -> None:
+    target = _data_dir(data_dir)
+    config = _load_agent_config(target)
+    if top_k is None:
+        console.print(f"retrieval.top_k: {config.retrieval.top_k}")
+        return
+
+    updated = replace(
+        config,
+        retrieval=RetrievalConfig(top_k=top_k),
+    )
+    save_config(updated, config_path_for(target))
+    console.print(f"Updated retrieval.top_k: {top_k}")
 
 
 @app.command()
@@ -167,8 +244,6 @@ def scan(
     use_fake = (embedding_provider or config.embedding.provider).lower() == "fake"
     embedder = _build_embedding_provider(config, embedding_provider)
     vector_store = None if use_fake else ChromaVectorStore(target / "vectors")
-    if rebuild and vector_store is not None:
-        vector_store.reset()
 
     scan_result = scan_vault_files(
         config.vault_path,
@@ -236,11 +311,83 @@ def scan(
 
 
 @app.command()
+def doctor(
+    data_dir: Path | None = typer.Option(None, "--data-dir"),
+    network: bool = typer.Option(False, "--network", help="Test live embedding and LLM provider connectivity."),
+) -> None:
+    target = _data_dir(data_dir)
+    try:
+        config = load_config(config_path_for(target))
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"FAIL Config: {exc}")
+        raise typer.Exit(1) from exc
+
+    failures = 0
+    console.print(f"OK Config: {config_path_for(target)}")
+    console.print(f"OK Vault: {config.vault_path}", soft_wrap=True)
+
+    if _env_is_available(config.llm.provider, config.llm.api_key_env):
+        console.print(f"OK LLM env: {config.llm.api_key_env}")
+    else:
+        failures += 1
+        console.print(f"FAIL LLM env: {config.llm.api_key_env} is not set")
+
+    if _env_is_available(config.embedding.provider, config.embedding.api_key_env):
+        console.print(f"OK Embedding env: {config.embedding.api_key_env}")
+    else:
+        failures += 1
+        console.print(f"FAIL Embedding env: {config.embedding.api_key_env} is not set")
+
+    if network:
+        failures += _run_network_doctor_checks(config)
+    else:
+        console.print("SKIP Network: use --network to test provider connectivity")
+
+    if failures:
+        raise typer.Exit(1)
+
+
+def _env_is_available(provider: str, api_key_env: str) -> bool:
+    if provider.lower() == "fake":
+        return True
+    return bool(os.environ.get(api_key_env))
+
+
+def _run_network_doctor_checks(config: AgentConfig) -> int:
+    failures = 0
+    try:
+        embedding = _build_embedding_provider(config, None)
+        vector = embedding.embed_query("obsidian-agent doctor embedding test")
+        if not vector:
+            raise RuntimeError("empty embedding")
+        console.print(f"OK Embedding connectivity: {len(vector)} dimensions")
+    except Exception as exc:
+        failures += 1
+        console.print(f"FAIL Embedding connectivity: {exc}")
+
+    try:
+        llm = _build_llm_provider(config, None)
+        answer = llm.answer("Reply with OK.", [])
+        if not answer:
+            raise RuntimeError("empty response")
+        console.print("OK LLM connectivity: received response")
+    except Exception as exc:
+        failures += 1
+        console.print(f"FAIL LLM connectivity: {exc}")
+    return failures
+
+
+@app.command()
 def ask(
     question: str,
     data_dir: Path | None = typer.Option(None, "--data-dir"),
     embedding_provider: str | None = typer.Option(None, "--embedding-provider"),
     llm_provider: str | None = typer.Option(None, "--llm-provider"),
+    show_context: bool = typer.Option(False, "--show-context", help="Print retrieved chunks before the answer."),
+    context_chars: int = typer.Option(240, "--context-chars", min=0, help="Maximum characters per retrieved chunk."),
+    top_k: int | None = typer.Option(None, "--top-k", min=1, help="Override the configured retrieval result count."),
+    use_memory: bool = typer.Option(False, "--use-memory", help="Include matching local memories in the answer context."),
+    memory_top_k: int = typer.Option(3, "--memory-top-k", min=1, help="Maximum local memories to include."),
 ) -> None:
     target = _data_dir(data_dir)
     config = _load_agent_config(target)
@@ -271,14 +418,60 @@ def ask(
             console.print("Run scan first")
             raise typer.Exit(1)
 
-    retriever = Retriever(vector_store, embedder, top_k=config.retrieval.top_k)
+    retriever = Retriever(vector_store, embedder, top_k=top_k or config.retrieval.top_k)
     contexts = retriever.retrieve(question)
+    if use_memory:
+        contexts = _memory_contexts(target, question, limit=memory_top_k) + contexts
+    if show_context:
+        _print_contexts(contexts, context_chars=context_chars)
     answer, sources = answer_question(question, contexts, llm)
 
     console.print(answer)
     console.print("Sources:")
     for source in sources:
         console.print(source)
+
+
+def _memory_contexts(target: Path, query: str, *, limit: int) -> list[RetrievedChunk]:
+    memories = _memory_store(target).search_memories(query, limit=limit)
+    contexts: list[RetrievedChunk] = []
+    for memory in memories:
+        contexts.append(
+            RetrievedChunk(
+                id=f"memory:{memory['id']}",
+                text=str(memory["text"]),
+                path="memory",
+                title="Memory",
+                heading="Local memory",
+                chunk_index=int(memory["id"]),
+                score=float(memory.get("score", 0)),
+            )
+        )
+    return contexts
+
+
+def _print_contexts(contexts: list[RetrievedChunk], *, context_chars: int) -> None:
+    console.print("Contexts:")
+    if not contexts:
+        console.print("- none")
+        return
+    for index, context in enumerate(contexts, start=1):
+        heading = context.heading or "(no heading)"
+        console.print(
+            f"{index}. {context.path} | {heading} | "
+            f"chunk={context.chunk_index} | score={context.score:.4f}",
+            soft_wrap=True,
+        )
+        snippet = _truncate_context_text(context.text, max_chars=context_chars)
+        if snippet:
+            console.print(snippet, soft_wrap=True)
+
+
+def _truncate_context_text(text: str, *, max_chars: int) -> str:
+    normalized = " ".join(text.split())
+    if max_chars <= 0 or len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars].rstrip() + "..."
 
 
 @app.command()
