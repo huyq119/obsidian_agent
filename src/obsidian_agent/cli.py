@@ -201,6 +201,26 @@ def memory_search(
         console.print(f"{memory['id']}. score={score} {memory['text']}", soft_wrap=True)
 
 
+@memory_app.command("delete")
+def memory_delete(
+    memory_id: int,
+    data_dir: Path | None = typer.Option(None, "--data-dir"),
+    force: bool = typer.Option(False, "--force", help="Delete without confirmation."),
+) -> None:
+    if not force:
+        confirmed = typer.confirm(f"Delete memory {memory_id}?")
+        if not confirmed:
+            console.print("Cancelled")
+            raise typer.Exit(1)
+
+    target = _data_dir(data_dir)
+    deleted = _memory_store(target).delete_memory(memory_id)
+    if not deleted:
+        console.print(f"Memory not found: {memory_id}")
+        raise typer.Exit(1)
+    console.print(f"Deleted memory: {memory_id}")
+
+
 @app.command()
 def configure(
     data_dir: Path | None = typer.Option(None, "--data-dir"),

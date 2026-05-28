@@ -16,3 +16,13 @@ def test_memory_store_add_list_and_search(tmp_path):
     assert memories[0]["text"] == "Vault contains article drafts."
     assert results[0]["text"] == "User prefers concise AI agent answers."
     assert results[0]["score"] > 0
+
+
+def test_memory_store_delete_memory(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    store.initialize()
+    memory_id = store.add_memory("Delete this memory.")
+
+    assert store.delete_memory(memory_id) is True
+    assert store.delete_memory(memory_id) is False
+    assert store.list_memories() == []

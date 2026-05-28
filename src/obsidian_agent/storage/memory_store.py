@@ -57,6 +57,11 @@ class MemoryStore:
         scored.sort(key=lambda item: (int(item["score"]), int(item["id"])), reverse=True)
         return scored[:limit]
 
+    def delete_memory(self, memory_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            return cursor.rowcount > 0
+
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
 

@@ -4,6 +4,32 @@ A local read-only CLI agent for Obsidian knowledge bases.
 
 See [Project Overview](docs/project-overview.md) for the project introduction, architecture, installation, and deployment guide.
 
+## Quick Start
+
+Initialize the agent with your Obsidian vault path.
+
+```bash
+obsidian-agent init --vault "/path/to/your/Obsidian vault" --preset deepseek-bigmodel
+```
+
+Check that the config, vault path, and required environment variables are ready.
+
+```bash
+obsidian-agent doctor
+```
+
+Scan the vault and build the local index.
+
+```bash
+obsidian-agent scan --rebuild
+```
+
+Ask your first question.
+
+```bash
+obsidian-agent ask "Summarize the main themes in this vault."
+```
+
 ## MVP Commands
 
 ```bash
@@ -86,6 +112,13 @@ List and search memories:
 ```bash
 obsidian-agent memory list
 obsidian-agent memory search "concise answers"
+```
+
+Delete a memory:
+
+```bash
+obsidian-agent memory delete 1
+obsidian-agent memory delete 1 --force
 ```
 
 Use matching memories during one answer:
