@@ -6,6 +6,7 @@ A local read-only CLI agent for Obsidian knowledge bases.
 
 See [Project Overview](docs/project-overview.md) for the project introduction, architecture, installation, and deployment guide.
 See [Contributing](CONTRIBUTING.md) for local development, testing, and privacy checks.
+See [Changelog](CHANGELOG.md) for release notes.
 
 ## Quick Start
 
