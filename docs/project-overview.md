@@ -59,6 +59,8 @@ obsidian-agent ask "问题" --show-context --top-k 10 --context-chars 120
 ```bash
 obsidian-agent configure
 obsidian-agent configure --top-k 10
+obsidian-agent configure --target-tokens 800 --max-tokens 1000
+obsidian-agent configure --preset deepseek-bigmodel
 ```
 
 `obsidian-agent doctor` 用于排查环境：
@@ -254,18 +256,26 @@ embedding_model = "embedding-3"
 dimensions = 1536
 ```
 
-### 5.3 检索参数
+### 5.3 检索和切块参数
 
-查看当前默认检索数量：
+查看当前常用配置：
 
 ```bash
 obsidian-agent configure
 ```
 
-持久化默认 `top_k`：
+持久化默认 `top_k` 和切块参数：
 
 ```bash
 obsidian-agent configure --top-k 10
+obsidian-agent configure --target-tokens 800 --max-tokens 1000
+```
+
+切换 provider preset：
+
+```bash
+obsidian-agent configure --preset deepseek-bigmodel
+obsidian-agent configure --preset default
 ```
 
 单次问答临时覆盖：

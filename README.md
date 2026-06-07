@@ -89,11 +89,13 @@ Inspect retrieval context when tuning embeddings, chunking, or `top_k`:
 
 ```bash
 obsidian-agent configure --top-k 10
+obsidian-agent configure --target-tokens 800 --max-tokens 1000
+obsidian-agent configure --preset deepseek-bigmodel
 obsidian-agent ask "Summarize the main themes in this vault." --show-context
 obsidian-agent ask "Summarize the main themes in this vault." --show-context --top-k 10 --context-chars 120
 ```
 
-`configure --top-k` persists the default retrieval count in `.obsidian-agent/config.toml`.
+`configure` persists retrieval, chunking, and provider preset settings in `.obsidian-agent/config.toml`.
 `ask --top-k` only overrides it for one question.
 
 ## Memory Usage

@@ -130,6 +130,68 @@ def test_configure_updates_retrieval_top_k(tmp_path):
     assert "Updated retrieval.top_k: 10" in result.stdout
 
 
+def test_configure_updates_chunking_options(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    data_dir = tmp_path / ".obsidian-agent"
+
+    init_result = runner.invoke(app, ["init", "--vault", str(vault), "--data-dir", str(data_dir)])
+    result = runner.invoke(
+        app,
+        [
+            "configure",
+            "--data-dir",
+            str(data_dir),
+            "--target-tokens",
+            "800",
+            "--max-tokens",
+            "1000",
+        ],
+    )
+
+    config = load_config(data_dir / "config.toml")
+    assert init_result.exit_code == 0
+    assert result.exit_code == 0
+    assert config.chunking.target_tokens == 800
+    assert config.chunking.max_tokens == 1000
+    assert "Updated chunking.target_tokens: 800" in result.stdout
+    assert "Updated chunking.max_tokens: 1000" in result.stdout
+
+
+def test_configure_rejects_invalid_chunking_bounds(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    data_dir = tmp_path / ".obsidian-agent"
+
+    init_result = runner.invoke(app, ["init", "--vault", str(vault), "--data-dir", str(data_dir)])
+    result = runner.invoke(
+        app,
+        ["configure", "--data-dir", str(data_dir), "--target-tokens", "1200", "--max-tokens", "800"],
+    )
+
+    assert init_result.exit_code == 0
+    assert result.exit_code == 1
+    assert "chunking.target_tokens cannot exceed chunking.max_tokens" in result.stdout
+
+
+def test_configure_updates_provider_preset(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    data_dir = tmp_path / ".obsidian-agent"
+
+    init_result = runner.invoke(app, ["init", "--vault", str(vault), "--data-dir", str(data_dir)])
+    result = runner.invoke(app, ["configure", "--data-dir", str(data_dir), "--preset", "deepseek-bigmodel"])
+
+    config = load_config(data_dir / "config.toml")
+    assert init_result.exit_code == 0
+    assert result.exit_code == 0
+    assert config.llm.provider == "deepseek"
+    assert config.embedding.provider == "openai_compatible"
+    assert config.embedding.api_key_env == "EMBEDDING_API_KEY"
+    assert config.embedding.embedding_model == "embedding-3"
+    assert "Updated provider preset: deepseek-bigmodel" in result.stdout
+
+
 def test_configure_without_options_prints_current_values(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -141,6 +203,8 @@ def test_configure_without_options_prints_current_values(tmp_path):
     assert init_result.exit_code == 0
     assert result.exit_code == 0
     assert "retrieval.top_k: 6" in result.stdout
+    assert "chunking.target_tokens: 1000" in result.stdout
+    assert "chunking.max_tokens: 1200" in result.stdout
 
 
 def test_doctor_reports_missing_env_without_network(tmp_path, monkeypatch):

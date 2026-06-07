@@ -10,6 +10,9 @@ from rich.console import Console
 
 from obsidian_agent.config import (
     AgentConfig,
+    ChunkingConfig,
+    EmbeddingConfig,
+    LLMConfig,
     RetrievalConfig,
     config_path_for,
     create_config,
@@ -225,19 +228,76 @@ def memory_delete(
 def configure(
     data_dir: Path | None = typer.Option(None, "--data-dir"),
     top_k: int | None = typer.Option(None, "--top-k", min=1, help="Persist the default retrieval result count."),
+    target_tokens: int | None = typer.Option(None, "--target-tokens", min=1, help="Persist chunk target token count."),
+    max_tokens: int | None = typer.Option(None, "--max-tokens", min=1, help="Persist chunk maximum token count."),
+    preset: str | None = typer.Option(None, "--preset", help="Update provider preset: default or deepseek-bigmodel."),
 ) -> None:
     target = _data_dir(data_dir)
     config = _load_agent_config(target)
-    if top_k is None:
-        console.print(f"retrieval.top_k: {config.retrieval.top_k}")
+    if top_k is None and target_tokens is None and max_tokens is None and preset is None:
+        _print_configure_values(config)
         return
 
-    updated = replace(
-        config,
-        retrieval=RetrievalConfig(top_k=top_k),
-    )
+    updated = config
+    messages: list[str] = []
+    if top_k is not None:
+        updated = replace(updated, retrieval=RetrievalConfig(top_k=top_k))
+        messages.append(f"Updated retrieval.top_k: {top_k}")
+
+    next_target_tokens = target_tokens if target_tokens is not None else updated.chunking.target_tokens
+    next_max_tokens = max_tokens if max_tokens is not None else updated.chunking.max_tokens
+    if next_target_tokens > next_max_tokens:
+        console.print("chunking.target_tokens cannot exceed chunking.max_tokens")
+        raise typer.Exit(1)
+    if target_tokens is not None or max_tokens is not None:
+        updated = replace(
+            updated,
+            chunking=ChunkingConfig(target_tokens=next_target_tokens, max_tokens=next_max_tokens),
+        )
+        if target_tokens is not None:
+            messages.append(f"Updated chunking.target_tokens: {target_tokens}")
+        if max_tokens is not None:
+            messages.append(f"Updated chunking.max_tokens: {max_tokens}")
+
+    if preset is not None:
+        try:
+            updated = _apply_provider_preset(updated, preset)
+        except ValueError as exc:
+            console.print(str(exc))
+            raise typer.Exit(1) from exc
+        messages.append(f"Updated provider preset: {preset}")
+
     save_config(updated, config_path_for(target))
-    console.print(f"Updated retrieval.top_k: {top_k}")
+    for message in messages:
+        console.print(message)
+
+
+def _print_configure_values(config: AgentConfig) -> None:
+    console.print(f"retrieval.top_k: {config.retrieval.top_k}")
+    console.print(f"chunking.target_tokens: {config.chunking.target_tokens}")
+    console.print(f"chunking.max_tokens: {config.chunking.max_tokens}")
+    console.print(f"llm.provider: {config.llm.provider}")
+    console.print(f"llm.chat_model: {config.llm.chat_model}")
+    console.print(f"embedding.provider: {config.embedding.provider}")
+    console.print(f"embedding.embedding_model: {config.embedding.embedding_model}")
+
+
+def _apply_provider_preset(config: AgentConfig, preset: str) -> AgentConfig:
+    if preset == "default":
+        return replace(config, llm=LLMConfig(), embedding=EmbeddingConfig())
+    if preset == "deepseek-bigmodel":
+        return replace(
+            config,
+            llm=LLMConfig(),
+            embedding=EmbeddingConfig(
+                provider="openai_compatible",
+                base_url="https://open.bigmodel.cn/api/paas/v4/embeddings",
+                api_key_env="EMBEDDING_API_KEY",
+                embedding_model="embedding-3",
+                dimensions=1536,
+            ),
+        )
+    raise ValueError("Unknown config preset: " + preset + ". Supported presets: default, deepseek-bigmodel")
 
 
 @app.command()
