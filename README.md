@@ -1,5 +1,7 @@
 # Obsidian Agent
 
+[![CI](https://github.com/huyq119/obsidian_agent/actions/workflows/ci.yml/badge.svg)](https://github.com/huyq119/obsidian_agent/actions/workflows/ci.yml)
+
 A local read-only CLI agent for Obsidian knowledge bases.
 
 See [Project Overview](docs/project-overview.md) for the project introduction, architecture, installation, and deployment guide.
@@ -155,3 +157,21 @@ obsidian-agent ask "agent project" --embedding-provider fake --llm-provider fake
 ```
 
 The MVP does not modify vault files.
+
+## Development and Testing
+
+Install the package with development dependencies:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+```
+
+Run the local test suite:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest
+```
+
+GitHub Actions runs the same test suite on Python 3.11 and 3.12 for pushes and
+pull requests targeting `main`.
